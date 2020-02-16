@@ -1,151 +1,142 @@
-"""
-Data handling functions.
-
-Nathanael Romano
-"""
-
-import numpy as np
-import cPickle
 import bcolz
+import numpy as np
+import os
+import pandas as pd
+import csv
+from sklearn.base import BaseEstimator, TransformerMixin
 
 
-BCOLZ_PATH = "/scratch/users/kjung/ehr-repr-learn/data/bcolz/"
-
-NOTES_PATH = "/scratch/users/naromano/deep-patient/shah/embedding_patients_cui.pkl"
-XTRAIN_PATH = "/scratch/users/kjung/ehr-repr-learn/data/bcolz/xtrain"
-XVAL_PATH = "/scratch/users/kjung/ehr-repr-learn/data/bcolz/xval"
-XTEST_PATH = "/scratch/users/kjung/ehr-repr-learn/data/bcolz/xtest"
-YTRAIN_PATH = "/scratch/users/kjung/ehr-repr-learn/data/y.train.txt"
-YVAL_PATH = "/scratch/users/kjung/ehr-repr-learn/data/y.val.txt"
-YTEST_PATH = "/scratch/users/kjung/ehr-repr-learn/data/y.test.txt"
-
-DIMENSION = 8930
-NOTES_DIM = 300
-
-
+# Varaibles in uppercase can be designated by user.
+DATA_PATH = "jupyter/datasets/HEBEI_datase.csv"
+PREDICT_COL = "Age"
+DROP_COL = []
+TEST_RATIO = 0.2
+BCOLZ_PATH = "jupyter/datasets/bcolz"
 
 class Dataset(object):
-  """
-  Dataset class to handle loading and parsing training data.
-  """
+    '''Dataset class to handle loading and parsing training data.'''
 
-  def __init__(self, use_notes=True, **kwargs):
-    self.notes_path = kwargs.get("notes", NOTES_PATH)
-    self.xtrain_path = kwargs.get("xtrain", XTRAIN_PATH)
-    self.xval_path = kwargs.get("xval", XVAL_PATH)
-    self.xtest_path = kwargs.get("xtest", XTEST_PATH)
-    self.ytrain_path = kwargs.get("ytrain", YTRAIN_PATH)
-    self.yval_path = kwargs.get("yval", YVAL_PATH)
-    self.ytest_path = kwargs.get("ytest", YTEST_PATH)
+    def __init__(self, use_notes=True, **kwargs):
+        # Load the data
+        self.dataset = self.load_data()
+        # One hot encoding
+        # Kate self.catonu()
+        self.catonu2()
+        np.savetxt('jupyter/datasets/hebei_transformed.csv', self.dataset, delimiter = ',')
+        # Split dataset into train_set and val_set and test_set
+        self.train_set, self.test_set =  self.split_train_test(test_ratio = TEST_RATIO)
 
-    self.dimension = kwargs.get("dim", DIMENSION)
-    with open(self.ytrain_path, "r") as f:
-        self.labels = [int(lab.replace('"', "")) for lab in
-                f.readline().strip().split(" ")[3:]]
+        # Split x and y in both train_set and test_set
+        xt = self.train_set.drop("age", axis = 1).values
+        self.xtrain = xt[:, 1:]
+        self.ytrain = self.train_set["age"].copy().values
+        np.savetxt('jupyter/datasets/train_y.csv', self.ytrain, delimiter = ',')
+        
+        xtest = self.test_set.drop("age", axis = 1).values
+        self.xtest = xtest[:, 1:]
+        self.ytest = self.test_set["age"].copy().values
+        np.savetxt('jupyter/datasets/test_y.csv', self.ytest, delimiter = ',')
 
-    self.use_notes = use_notes
-    self.notes_dim = kwargs.get("notes_dim", NOTES_DIM)
-
-    self.patient_ids = {}
-    self._index_in_epochs = 0
-    self._epochs_completed = 0
-
-    # Load training set
-    self.load_set("train")
-    if use_notes:
-        self.dimension += self.notes_dim
+        # Get the dimension of x
+        self.dimension = self.xtrain.shape[1]
+        self._index_in_epochs = 0
+        self._epochs_completed = 0
 
 
-  def load_set(self, set_name):
-    """
-    Loads a train/val/test set and its labels.
+    def load_data(self, data_path = DATA_PATH):
+        return pd.read_csv(data_path)
 
-    Uses bcolz if the dataset is in /bcolz/
-    """
-    xpath = getattr(self, "x" + set_name + "_path")
-    if "bcolz" in xpath:
-        car = bcolz.open(xpath, mode="r")
-        x = np.array(car)
-    else:
-        x = np.loadtxt(
-          getattr(self, "x" + set_name + "_path"),
-          skiprows=1
-        )
+    def catonu(self):
+        with open('jupyter/datasets/HEBEI_datase.csv', 'r') as f:
+            d_reader = csv.DictReader(f)
+            #get fieldnames from DictReader object and store in list
+            headers = d_reader.fieldnames
 
-    y = np.loadtxt(
-      getattr(self, "y" + set_name + "_path"),
-      skiprows=1,
-      usecols=[0] + range(80)[3:]
-    )
+        cont_headers = []
+        dum_headers = []
+        for header in headers[1:-1]:
+            if self.dataset[header].nunique() > 10:
+                cont_headers.append(header)
+            else:
+                dum_headers.append(header)
 
-    # Save patient ids and mapping to row id
-    ids = y[:, 0]
-    self.patient_ids[set_name] = dict(zip(ids, range(len(ids))))
+        for header in dum_headers:
+            self.dataset[header].apply(str)
+            self.dataset=pd.concat([self.dataset, pd.get_dummies(self.dataset[header], prefix = header, columns = header)], axis=1)
+            self.dataset=self.dataset.drop(header, axis=1)
 
-    if self.use_notes:
-        # Pad x to add encoding dim
-        x = np.pad(x, ((0, 0), (0, self.notes_dim)), mode='constant')
+    def catonu2(self):
+        with open('jupyter/datasets/HEBEI_datase.csv', 'r') as f:
+            d_reader = csv.DictReader(f)
+            #get fieldnames from DictReader object and store in list
+            headers = d_reader.fieldnames
 
-    setattr(self, "x" + set_name, x)
-    setattr(self, "y" + set_name, y)
-
-    if self.use_notes:
-        self._load_notes(set_name)
-
-
-  def _load_notes(self, set_name):
-    """
-    Loads notes and adds them to a (previously padded) train/val/test set.
-    """
-    with open(self.notes_path, "r") as f:
-        while True:
-            try:
-                pid, encoding = cPickle.load(f)
-                if pid in self.patient_ids[set_name]:
-                    getattr(self, "x" +
-                            set_name)[self.patient_ids[set_name][pid],
-                            self.dimension-self.notes_dim:] = encoding
-            except EOFError:
-                break
+        cont_headers = []
+        dum_headers = []
+        for header in headers[1:-1]:
+            if self.dataset[header].nunique() > 10:
+                cont_headers.append(header)
+            else:
+                dum_headers.append(header)
 
 
-  def next_batch(self, batchSize, use_labels=False):
-    """
-    Gets the next datai batch, and shuffles if end of epoch.
-    """
-    start = self._index_in_epochs
-    self._index_in_epochs += batchSize
-
-    if self._index_in_epochs >= self.xtrain.shape[0]:
-        self._epochs_completed += 1
-        perm = np.arange(self.xtrain.shape[0])
-        np.random.shuffle(perm)
-        self.xtrain = self.xtrain[perm, :]
-        self.ytrain = self.ytrain[perm, :]
-        start = 0
-        self._index_in_epochs = batchSize
-
-    end = self._index_in_epochs
-    if use_labels:
-        return self.xtrain[start:end, :], self.ytrain[start:end, 1:]
-    else:
-        return self.xtrain[start:end, :]
+        # transform continous variables into categorical variables
+        for header in cont_headers:
+            labelList = [1,2,3,4,5,6,7]
+            var_name = header + ' bin'
+            self.dataset[var_name] = pd.cut(self.dataset[header],7)
+            self.dataset=pd.concat([self.dataset, pd.get_dummies(self.dataset[var_name], prefix = header, columns = header)], axis=1)
+            self.dataset=self.dataset.drop(var_name, axis=1)            
+            self.dataset = self.dataset.drop(header, axis = 1)
 
 
+        # one-hot encoding all the variables
+        for header in dum_headers:
+            self.dataset[header].apply(str)
+            self.dataset=pd.concat([self.dataset, pd.get_dummies(self.dataset[header], prefix = header, columns = header)], axis=1)
+            self.dataset=self.dataset.drop(header, axis=1)
+
+
+    def split_train_test(self, test_ratio):
+        shuffled_indices = np.random.permutation(len(self.dataset))
+        test_set_size = int(len(self.dataset)*test_ratio)
+        test_indices = shuffled_indices[:test_set_size]
+        train_indices = shuffled_indices[test_set_size:]
+        return self.dataset.iloc[train_indices], self.dataset.iloc[test_indices]
+
+    def load_set(self, set_name):
+        """
+        Loads a train/val/test set and its labels.
+        Uses bcolz if the dataset is in /bcolz/
+        """
+        if set_name == 'test':
+            return self.xtest
+
+    def next_batch(self, batchSize, use_labels=False):
+        """
+        Gets the next data batch, and shuffles if end of epoch.
+        """
+        start = self._index_in_epochs
+        self._index_in_epochs += batchSize
+
+        if self._index_in_epochs >= self.xtrain.shape[0]:
+            self._epochs_completed += 1
+            perm = np.arange(self.xtrain.shape[0])
+            np.random.shuffle(perm)
+            self.xtrain = self.xtrain[perm, :]
+            self.ytrain = self.ytrain[perm]
+            start = 0
+            self._index_in_epochs = batchSize
+
+        end = self._index_in_epochs
+        if use_labels:
+            return self.xtrain[start:end, :], self.ytrain[start:end]
+        else:
+            return self.xtrain[start:end, :]
 
 def save_data(data, name, path=None):
-  """
-  Saves a dataset as bcolz archive.
-  """
-  if path is None:
-      path = BCOLZ_PATH
-
-  car = bcolz.carray(data, rootdir=path+name)
-  car.flush()
-
-
-
-if __name__ == "__main__":
-    # For testing purposes, loads smallest set.
-    data = load_data(use_notes=False, xtrain=XVAL_PATH, ytrain=YVAL_PATH)
-
+    '''Saves a dataset as bcolz archive.'''
+    if path is None:
+        path = BCOLZ_PATH
+    car = bcolz.carray(data, rootdir=path+name)
+    car.flush()
