@@ -1,3 +1,8 @@
+"""
+Deep Patient implementation
+Nathanael Romano
+"""
+
 import bcolz
 import numpy as np
 import os
